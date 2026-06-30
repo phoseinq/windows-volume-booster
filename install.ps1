@@ -1,24 +1,27 @@
 <#
   install.ps1 — one-command setup for Windows Volume Booster
-  Run from the repo folder:
-      powershell -ExecutionPolicy Bypass -File install.ps1
-  It self-elevates and does everything: VB-Cable driver, Python deps,
-  app install, and autostart. No reboot needed.
+
+  Run straight from PowerShell (no clone needed):
+      irm https://raw.githubusercontent.com/phoseinq/windows-volume-booster/main/install.ps1 | iex
+
+  Self-elevates (one UAC), installs VB-Cable + Python deps, the app, and autostart.
 #>
 
-# ---- self-elevate ----
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
-    Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy","Bypass","-File","`"$PSCommandPath`""
-    exit
-}
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RAW = 'https://raw.githubusercontent.com/phoseinq/windows-volume-booster/main'
+
+# ---- self-elevate (re-run the one-liner as admin) ----
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+    Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command',"irm $RAW/install.ps1 | iex"
+    return
+}
+
 $dest = "$env:LOCALAPPDATA\AudioBoost"
 
 # ---- locate Python ----
 $pyw = (Get-Command pythonw.exe -EA SilentlyContinue).Source
-if (-not $pyw) { Write-Host "Python not found. Install Python 3.11+ first (python.org)."; pause; exit 1 }
+if (-not $pyw) { Write-Host "Python not found. Install Python 3.11+ (python.org), then re-run." -ForegroundColor Red; pause; exit 1 }
 $py = $pyw -replace 'pythonw\.exe$','python.exe'
 
 Write-Host "[1/5] Python packages..."
@@ -36,7 +39,9 @@ if (-not (Get-PnpDevice -Class AudioEndpoint -EA SilentlyContinue | Where-Object
 
 Write-Host "[3/5] Installing app..."
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Copy-Item (Join-Path $here 'boost_tray.pyw') (Join-Path $dest 'boost_tray.pyw') -Force
+$local = if ($PSCommandPath) { Join-Path (Split-Path -Parent $PSCommandPath) 'boost_tray.pyw' } else { $null }
+if ($local -and (Test-Path $local)) { Copy-Item $local "$dest\boost_tray.pyw" -Force }
+else { Invoke-WebRequest "$RAW/boost_tray.pyw" -OutFile "$dest\boost_tray.pyw" -UserAgent 'Mozilla/5.0' }
 
 Write-Host "[4/5] Autostart on login..."
 $val = "`"$pyw`" `"$dest\boost_tray.pyw`""
@@ -48,3 +53,4 @@ Start-Process $pyw -ArgumentList "`"$dest\boost_tray.pyw`""
 Write-Host ""
 Write-Host "Done. A speaker icon is in your tray." -ForegroundColor Green
 Write-Host "Set Windows volume to 100%, then press Volume-Up to boost beyond 100%."
+Start-Sleep 4

@@ -30,10 +30,10 @@ The installer pulls in everything else (VB-Cable driver + Python packages).
 
 ## Install
 
-From the repo folder:
+Paste this into PowerShell — that's it (no clone needed):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+irm https://raw.githubusercontent.com/phoseinq/windows-volume-booster/main/install.ps1 | iex
 ```
 
 It self-elevates (one UAC prompt) and:
