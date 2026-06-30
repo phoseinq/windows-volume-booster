@@ -31,8 +31,16 @@ function Find-Pyw {
 $pyw = Find-Pyw
 if (-not $pyw) {
     Write-Host "[0/5] Installing Python..."
-    winget install -e --id Python.Python.3.12 --scope user --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+    try { winget install -e --id Python.Python.3.12 --scope user --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null } catch {}
     $pyw = Find-Pyw
+    if (-not $pyw) {
+        # no winget (e.g. Windows Sandbox / LTSC): get the official installer directly
+        $pv = '3.12.8'
+        $f = "$env:TEMP\python-$pv-amd64.exe"
+        Invoke-WebRequest "https://www.python.org/ftp/python/$pv/python-$pv-amd64.exe" -OutFile $f -UseBasicParsing
+        Start-Process $f -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=1','Include_pip=1','Include_launcher=1' -Wait
+        $pyw = Find-Pyw
+    }
 }
 if (-not $pyw) { Write-Host "Could not install Python automatically. Get it from python.org and re-run." -ForegroundColor Red; pause; exit 1 }
 $py = $pyw -replace 'pythonw\.exe$','python.exe'
