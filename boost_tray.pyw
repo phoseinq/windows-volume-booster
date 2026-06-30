@@ -150,10 +150,14 @@ try:
 except Exception as e:
     print('device switch failed:', e)
 
+# VB-Cable does NOT attenuate the loopback, so the Windows volume (of VB-Cable,
+# the default device) must be applied here too — otherwise volume below 100%
+# would do nothing. Effective gain = boost * windows-volume.
+_winvol = [1.0]
 def _audio_cb(indata, outdata, frames, t, status):
     with _lock:
         b = _boost
-    np.clip(indata * b, -1.0, 1.0, out=outdata)
+    np.clip(indata * (b * _winvol[0]), -1.0, 1.0, out=outdata)
 
 _stream = None
 if _in is not None and _out is not None:
@@ -165,6 +169,20 @@ if _in is not None and _out is not None:
             break
         except Exception:
             time.sleep(1.0)
+
+def _poll_winvol():
+    CoInitialize()
+    iface = None
+    while True:
+        try:
+            if iface is None:
+                iface = AudioUtilities.GetSpeakers().EndpointVolume
+            _winvol[0] = iface.GetMasterVolumeLevelScalar()
+        except Exception:
+            iface = None
+        time.sleep(0.1)
+
+threading.Thread(target=_poll_winvol, daemon=True).start()
 
 # ── tk master + live DPI scale (auto-adapts per monitor) ──────────
 root = tk.Tk()
