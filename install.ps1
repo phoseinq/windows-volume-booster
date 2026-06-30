@@ -19,9 +19,22 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 $dest = "$env:LOCALAPPDATA\AudioBoost"
 
-# ---- locate Python ----
-$pyw = (Get-Command pythonw.exe -EA SilentlyContinue).Source
-if (-not $pyw) { Write-Host "Python not found. Install Python 3.11+ (python.org), then re-run." -ForegroundColor Red; pause; exit 1 }
+# ---- Python (install automatically if missing) ----
+function Find-Pyw {
+    $p = (Get-Command pythonw.exe -EA SilentlyContinue).Source
+    if (-not $p) {
+        $c = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\pythonw.exe" -EA SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
+        if ($c) { $p = $c.FullName }
+    }
+    return $p
+}
+$pyw = Find-Pyw
+if (-not $pyw) {
+    Write-Host "[0/5] Installing Python..."
+    winget install -e --id Python.Python.3.12 --scope user --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+    $pyw = Find-Pyw
+}
+if (-not $pyw) { Write-Host "Could not install Python automatically. Get it from python.org and re-run." -ForegroundColor Red; pause; exit 1 }
 $py = $pyw -replace 'pythonw\.exe$','python.exe'
 
 Write-Host "[1/5] Python packages..."

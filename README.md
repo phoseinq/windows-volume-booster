@@ -24,9 +24,9 @@ VB-Cable while running and switches it back when you quit.
 ## Requirements
 
 - Windows 10 / 11
-- Python 3.11+ (with `pythonw.exe` on PATH)
 
-The installer pulls in everything else (VB-Cable driver + Python packages).
+The installer handles everything — it installs Python (via winget if it's missing), the
+VB-Cable driver, and the Python packages.
 
 ## Install
 
