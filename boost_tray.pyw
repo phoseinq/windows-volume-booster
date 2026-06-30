@@ -23,12 +23,16 @@ _mx = ctypes.windll.kernel32.CreateMutexW(None, False, 'AudioBoostBeyond100_sing
 if ctypes.windll.kernel32.GetLastError() == 183:          # ERROR_ALREADY_EXISTS
     sys.exit(0)
 
-# DPI-aware BEFORE any GUI, so PIL pixels map 1:1 to device pixels
+# DPI-aware BEFORE any GUI, so PIL pixels map 1:1 to device pixels.
+# Per-Monitor-V2 (like browsers) — avoids the bitmap-stretch (pixelated HUD)
+# that happens when a v1-aware overlay sits over a v2-aware window.
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)        # per-monitor
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
 except Exception:
-    try: ctypes.windll.user32.SetProcessDPIAware()
-    except Exception: pass
+    try: ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try: ctypes.windll.user32.SetProcessDPIAware()
+        except Exception: pass
 
 import sounddevice as sd
 import numpy as np
@@ -247,15 +251,15 @@ def _lerp(c0, c1, t):
 def _render_card(pct, mx):
     ss = 3
     w, h = px(CARD_W), px(CARD_H)
-    big = Image.new('RGBA', (w*ss, h*ss), KEY)
+    # opaque card filling the whole image; the window corners are rounded by DWM
+    # (no color-key transparency -> no dirty fringe over bright/browser backgrounds)
+    big = Image.new('RGB', (w*ss, h*ss), CARD[:3])
     d = ImageDraw.Draw(big)
     # bar color eases yellow -> red as boost rises above the safe threshold
     if pct <= SAFE_MAX or mx <= SAFE_MAX:
         acc = ACC_RGB
     else:
         acc = _lerp(ACC_RGB, DANGER_RGB, (pct - SAFE_MAX) / (mx - SAFE_MAX))
-    # flat card, no outline/border (clean, like Windows)
-    d.rounded_rectangle([0, 0, w*ss-1, h*ss-1], radius=px(RAD)*ss, fill=CARD)
     # speaker glyph
     d.text((px(ICONX)*ss, px(MIDY)*ss), GLYPH_VOL, font=_ifont(px(ICON_PX)*ss),
            fill=NUM_FG, anchor='mm')
@@ -280,10 +284,20 @@ fly.withdraw()
 fly.overrideredirect(True)
 fly.attributes('-topmost', True)
 fly.attributes('-alpha', ALPHA)
-fly.attributes('-transparentcolor', KEY_HEX)
-fly.configure(bg=KEY_HEX)
-lbl = tk.Label(fly, bg=KEY_HEX, bd=0, highlightthickness=0)
+fly.configure(bg='#202026')
+lbl = tk.Label(fly, bd=0, highlightthickness=0)
 lbl.pack()
+
+_rounded = [False]
+def _round_corners():
+    if _rounded[0]: return
+    try:
+        hwnd = ctypes.windll.user32.GetAncestor(fly.winfo_id(), 2)  # GA_ROOT
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)  # ROUND
+        _rounded[0] = True
+    except Exception:
+        pass
+
 _photo = [None]
 _disp = [float(int(_boost*100))]      # animated displayed value (eases toward _boost)
 _bar_job = [None]
@@ -391,6 +405,7 @@ def show_hud():
         fly.geometry(f'+{_pos[0]}+{y0}')
         fly.attributes('-alpha', 0.0)
         fly.deiconify(); fly.lift()
+        fly.update_idletasks(); _round_corners()
         _animate(y0, _pos[1], 0.0, ALPHA, 380, _easeOut, _arm)
     else:
         fly.geometry(f'+{_pos[0]}+{_pos[1]}')
