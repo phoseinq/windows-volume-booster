@@ -1,5 +1,7 @@
 # Windows Volume Booster
 
+![demo](demo.gif)
+
 Make Windows audio louder than 100%. A small tray app with a HUD that looks like
 the native Windows volume flyout, but lets you push the volume past 100% — up to
 500% by default.
