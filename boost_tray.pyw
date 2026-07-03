@@ -154,9 +154,10 @@ try:
 except Exception as e:
     print('device switch failed:', e)
 
-# VB-Cable does NOT attenuate the loopback, so the Windows volume (of VB-Cable,
-# the default device) must be applied here too — otherwise volume below 100%
-# would do nothing. Effective gain = boost * windows-volume.
+# VB-Cable does NOT attenuate the loopback, so the Windows volume/mute (of
+# VB-Cable, the default device) must be applied here too — otherwise volume
+# below 100% and the mute key would do nothing.
+# Effective gain = boost * windows-volume * (0 if muted).
 _winvol = [1.0]
 def _audio_cb(indata, outdata, frames, t, status):
     with _lock:
@@ -181,7 +182,7 @@ def _poll_winvol():
         try:
             if iface is None:
                 iface = AudioUtilities.GetSpeakers().EndpointVolume
-            _winvol[0] = iface.GetMasterVolumeLevelScalar()
+            _winvol[0] = 0.0 if iface.GetMute() else iface.GetMasterVolumeLevelScalar()
         except Exception:
             iface = None
         time.sleep(0.1)
