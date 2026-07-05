@@ -159,10 +159,28 @@ except Exception as e:
 # below 100% and the mute key would do nothing.
 # Effective gain = boost * windows-volume * (0 if muted).
 _winvol = [1.0]
+
+# Peak limiter instead of hard clipping: hard clip turns boosted peaks into
+# square waves (harsh crackle, no extra loudness). The limiter keeps full gain
+# on quiet material and smoothly rides peaks down to the ceiling instead.
+LIM_CEIL = 0.92          # output ceiling
+LIM_REL  = 0.93          # envelope decay per 512-sample block (~150 ms release)
+_lim_env = [0.0]         # smoothed peak level
+_lim_gr  = [1.0]         # gain reduction at end of previous block
+
 def _audio_cb(indata, outdata, frames, t, status):
     with _lock:
         b = _boost
-    np.clip(indata * (b * _winvol[0]), -1.0, 1.0, out=outdata)
+    x = indata * (b * _winvol[0])
+    peak = float(np.max(np.abs(x))) if frames else 0.0
+    env = max(peak, _lim_env[0] * LIM_REL)   # instant attack, smooth release
+    _lim_env[0] = env
+    gr = LIM_CEIL / env if env > LIM_CEIL else 1.0
+    if gr != 1.0 or _lim_gr[0] != 1.0:
+        # ramp the gain across the block so level changes don't zipper
+        x *= np.linspace(_lim_gr[0], gr, frames, dtype=np.float32)[:, None]
+    _lim_gr[0] = gr
+    np.clip(x, -1.0, 1.0, out=outdata)       # safety only; limiter rarely lets peaks through
 
 _stream = None
 if _in is not None and _out is not None:
