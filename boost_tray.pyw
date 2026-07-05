@@ -168,10 +168,47 @@ LIM_REL  = 0.93          # envelope decay per 512-sample block (~150 ms release)
 _lim_env = [0.0]         # smoothed peak level
 _lim_gr  = [1.0]         # gain reduction at end of previous block
 
+# De-esser: boosting pushes sibilance ("s", 5-10 kHz) painfully forward.
+# A linear-phase FIR splits the signal at ~5 kHz; when the high band spikes
+# past DE_T it alone is ducked, the rest of the sound stays untouched.
+DE_T, DE_REL = 0.22, 0.85            # HF threshold / envelope decay per block (~40 ms)
+_DN = 63; _DMID = _DN // 2           # 63-tap split = 0.65 ms fixed latency
+_dk = np.arange(_DN) - _DMID
+_dlp = (np.sinc(2 * 5000 / 48000 * _dk) * np.hamming(_DN)).astype(np.float32)
+_dlp /= _dlp.sum()                   # unity gain low band
+_de_hist = [None]                    # last _DN-1 input samples (filter state)
+_de_env = [0.0]
+_de_gr = [1.0]
+_de_pend = [None]                    # 1-block lookahead: output lags one block so the
+                                     # duck is already in place when the "s" arrives
+
 def _audio_cb(indata, outdata, frames, t, status):
     with _lock:
         b = _boost
     x = indata * (b * _winvol[0])
+
+    # split bands (low = FIR lowpass, hf = aligned residual)
+    h = _de_hist[0]
+    if h is None or h.shape[1] != x.shape[1]:
+        h = np.zeros((_DN - 1, x.shape[1]), np.float32)
+    buf = np.concatenate([h, x])
+    _de_hist[0] = buf[-(_DN - 1):].copy()
+    low = np.stack([np.convolve(buf[:, c], _dlp, 'valid') for c in range(x.shape[1])],
+                   axis=1).astype(np.float32)
+    hf = buf[_DMID:_DMID + frames] - low
+    # duck only the high band when it spikes; the gain target comes from the
+    # CURRENT block but is applied while playing the PREVIOUS one (lookahead),
+    # so the reduction lands before the sibilant instead of one block late
+    de = max(float(np.max(np.abs(hf))) if frames else 0.0, _de_env[0] * DE_REL)
+    _de_env[0] = de
+    dgr = DE_T / de if de > DE_T else 1.0
+    p = _de_pend[0]
+    if p is None or p[0].shape != low.shape:
+        p = (np.zeros_like(low), np.zeros_like(hf))
+    _de_pend[0] = (low, hf)
+    x = p[0] + p[1] * np.linspace(_de_gr[0], dgr, frames, dtype=np.float32)[:, None]
+    _de_gr[0] = dgr
+
     peak = float(np.max(np.abs(x))) if frames else 0.0
     env = max(peak, _lim_env[0] * LIM_REL)   # instant attack, smooth release
     _lim_env[0] = env
