@@ -81,7 +81,7 @@ KEY_STEP = 5                 # boost % change per volume-key press
 
 def _save_cfg():
     try:
-        json.dump({'max': _max}, open(CFG_FILE, 'w'))
+        json.dump({'max': _max, 'out': _cfg.get('out', '')}, open(CFG_FILE, 'w'))
     except Exception:
         pass
 
@@ -120,10 +120,42 @@ def _restore_default():
 
 atexit.register(_restore_default)
 
+def _find_out_by_name(name):
+    """match an endpoint FriendlyName against sounddevice outputs
+    (MME names are truncated to 31 chars, so compare by prefix)"""
+    if not name:
+        return None
+    n = name.lower()
+    for i, d in enumerate(sd.query_devices()):
+        if d['max_output_channels'] > 0:
+            dn = d['name'].lower()
+            if n.startswith(dn) or dn.startswith(n):
+                return i
+    return None
+
+def _real_output_name():
+    """the device the user actually listens on = whatever was default before
+    we took over (headset, speakers, ...). If the previous run died without
+    restoring the default (it still points at the cable), fall back to the
+    name remembered in the config."""
+    try:
+        name = AudioUtilities.GetSpeakers().FriendlyName or ''
+    except Exception:
+        name = ''
+    if 'cable' in name.lower():
+        name = _cfg.get('out', '')
+    return name
+
 def _wait_devices():
+    name = _real_output_name()
+    if name:
+        _cfg['out'] = name
+        _save_cfg()
     for _ in range(40):
         i = _find_sd('CABLE Output', 'in')
-        o = _find_sd('Speakers (Realtek', 'out') or _find_sd('Speakers', 'out')
+        o = _find_out_by_name(name)
+        if o is None:
+            o = _find_sd('Speakers (Realtek', 'out') or _find_sd('Speakers', 'out')
         if i is not None and o is not None:
             try: c = min(sd.query_devices(i)['max_input_channels'], 2)
             except Exception: c = 2
@@ -220,15 +252,116 @@ def _audio_cb(indata, outdata, frames, t, status):
     np.clip(x, -1.0, 1.0, out=outdata)       # safety only; limiter rarely lets peaks through
 
 _stream = None
+_cur_out = [None]                     # endpoint FriendlyName the stream renders to
+
+def _open_stream(i, o, c):
+    global _stream
+    try:
+        if _stream: _stream.close()
+    except Exception:
+        pass
+    _stream = None
+    try:
+        _stream = sd.Stream(samplerate=48000, blocksize=512, device=(i, o),
+                            channels=c, dtype='float32', callback=_audio_cb, latency='low')
+        _stream.start()
+        return True
+    except Exception:
+        return False
+
+def _unmute_endpoint(name):
+    """a muted sink is never what the user wants for the active output"""
+    try:
+        for d in AudioUtilities.GetAllDevices():
+            if d.FriendlyName == name:
+                d.EndpointVolume.SetMute(0, None)
+                return
+    except Exception:
+        pass
+
 if _in is not None and _out is not None:
     for _ in range(10):
-        try:
-            _stream = sd.Stream(samplerate=48000, blocksize=512, device=(_in, _out),
-                                channels=_ch, dtype='float32', callback=_audio_cb, latency='low')
-            _stream.start()
+        if _open_stream(_in, _out, _ch):
+            try: _cur_out[0] = sd.query_devices(_out)['name']
+            except Exception: pass
             break
+        time.sleep(1.0)
+
+_engaged = [True]                     # default device == cable -> booster active
+_prev_active = [None]                 # active endpoint names from the last poll
+
+def _watch_output():
+    """follow device hot-plug like Windows does: when a headset appears Windows
+    makes it the default — adopt it as our sink, take the default back for the
+    cable, and reopen the stream; when the sink disappears fall back to the
+    speakers. A MANUAL default change by the user is respected: the booster goes
+    idle (no HUD, native keys) until the cable is default again or a device is
+    plugged in. Also revives the stream if it ever dies."""
+    CoInitialize()
+    while True:
+        time.sleep(2.0)
+        try:
+            try:
+                cur = AudioUtilities.GetSpeakers().FriendlyName or ''
+            except Exception:
+                continue
+            active = []
+            try:
+                for d in AudioUtilities.GetAllDevices():
+                    if d.FriendlyName and str(d.state).endswith('Active'):
+                        active.append(d.FriendlyName)
+            except Exception:
+                continue
+            appeared = set(active) - set(_prev_active[0] or active)
+            _prev_active[0] = active
+            if 'cable' not in cur.lower():
+                if cur in appeared:
+                    # a device was just plugged in and Windows switched to it:
+                    # adopt it as our sink and take the default back
+                    _cfg['out'] = cur; _save_cfg()
+                    try:
+                        vb = _vb_cable_id()
+                        if vb: _set_default(vb)
+                    except Exception:
+                        pass
+                else:
+                    # the user picked another output on purpose — stay out of the way
+                    _engaged[0] = False
+                    continue
+            _engaged[0] = True
+            want = _cfg.get('out', '')
+            target = want if want in active else None
+            if target is None:
+                target = next((n for n in active if n.startswith('Speakers (Realtek')), None) \
+                      or next((n for n in active if n.startswith('Speakers')), None)
+            if not target:
+                continue
+            dead = _stream is None or not _stream.active
+            if target == _cur_out[0] and not dead:
+                continue
+            # sink changed (plug/unplug) or stream died: refresh the device
+            # table (PortAudio snapshots it at init) and reopen
+            try:
+                if _stream: _stream.close()
+            except Exception:
+                pass
+            try:
+                sd._terminate(); sd._initialize()
+            except Exception:
+                pass
+            i = _find_sd('CABLE Output', 'in')
+            o = _find_out_by_name(target)
+            if i is None or o is None:
+                continue
+            try: c = min(sd.query_devices(i)['max_input_channels'], 2)
+            except Exception: c = 2
+            if _open_stream(i, o, c):
+                _cur_out[0] = target
+                _unmute_endpoint(target)
         except Exception:
-            time.sleep(1.0)
+            pass
+
+threading.Thread(target=_watch_output, daemon=True).start()
 
 def _poll_winvol():
     CoInitialize()
@@ -607,7 +740,9 @@ def _at_max():
         return False
 
 def _hook_cb(nCode, wParam, lParam):
-    if nCode >= 0 and wParam == WM_KEYDOWN:
+    # only act while the booster owns the output (default device = the cable);
+    # if the user routed audio elsewhere, keys behave natively and no HUD shows
+    if nCode >= 0 and wParam == WM_KEYDOWN and _engaged[0]:
         vk = ctypes.cast(lParam, ctypes.POINTER(_KBD)).contents.vk
         if vk == VK_VOLUME_UP:
             if _at_max():                 # Windows already at 100% -> boost up
