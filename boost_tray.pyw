@@ -192,13 +192,24 @@ except Exception as e:
 # Effective gain = boost * windows-volume * (0 if muted).
 _winvol = [1.0]
 
-# Peak limiter instead of hard clipping: hard clip turns boosted peaks into
-# square waves (harsh crackle, no extra loudness). The limiter keeps full gain
-# on quiet material and smoothly rides peaks down to the ceiling instead.
-LIM_CEIL = 0.92          # output ceiling
-LIM_REL  = 0.93          # envelope decay per 512-sample block (~150 ms release)
-_lim_env = [0.0]         # smoothed peak level
-_lim_gr  = [1.0]         # gain reduction at end of previous block
+# Soft clipper instead of a peak limiter. A limiter pulls the whole block's
+# gain down to hold the peak, so on already-loud material the boost is fully
+# cancelled (the number rises but nothing gets louder). The soft clipper is
+# per-sample: everything below the knee passes linearly (quiet videos — the
+# whole point — get exactly N× louder, no distortion), and only peaks above
+# the knee are smoothly saturated toward the ceiling, so louder material still
+# gains loudness without the hard-clip crackle.
+SC_KNEE = 0.6            # linear below this; tanh soft-knee from here to 1.0
+_SC_SPAN = 1.0 - SC_KNEE
+
+def _softclip(x):
+    ax = np.abs(x)
+    over = ax > SC_KNEE
+    if over.any():
+        x = x.copy()
+        s = np.sign(x[over])
+        x[over] = s * (SC_KNEE + _SC_SPAN * np.tanh((ax[over] - SC_KNEE) / _SC_SPAN))
+    return x
 
 # De-esser: boosting pushes sibilance ("s", 5-10 kHz) painfully forward.
 # A linear-phase FIR splits the signal at ~5 kHz; when the high band spikes
@@ -241,15 +252,7 @@ def _audio_cb(indata, outdata, frames, t, status):
     x = p[0] + p[1] * np.linspace(_de_gr[0], dgr, frames, dtype=np.float32)[:, None]
     _de_gr[0] = dgr
 
-    peak = float(np.max(np.abs(x))) if frames else 0.0
-    env = max(peak, _lim_env[0] * LIM_REL)   # instant attack, smooth release
-    _lim_env[0] = env
-    gr = LIM_CEIL / env if env > LIM_CEIL else 1.0
-    if gr != 1.0 or _lim_gr[0] != 1.0:
-        # ramp the gain across the block so level changes don't zipper
-        x *= np.linspace(_lim_gr[0], gr, frames, dtype=np.float32)[:, None]
-    _lim_gr[0] = gr
-    np.clip(x, -1.0, 1.0, out=outdata)       # safety only; limiter rarely lets peaks through
+    np.clip(_softclip(x), -1.0, 1.0, out=outdata)   # per-sample soft saturation
 
 _stream = None
 _cur_out = [None]                     # endpoint FriendlyName the stream renders to
