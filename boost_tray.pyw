@@ -39,6 +39,7 @@ import numpy as np
 import pystray
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from pycaw.pycaw import AudioUtilities
+from pycaw.constants import EDataFlow, DEVICE_STATE
 from comtypes import (CoInitialize, CoCreateInstance, GUID, COMMETHOD,
                       HRESULT, IUnknown, CLSCTX_ALL)
 from ctypes import c_int, c_wchar_p
@@ -201,6 +202,59 @@ def _unmute_capture():
 
 _unmute_capture()
 
+def _suffix(name):
+    # the "(Device Model)" tail shared by a headset's speaker and its mic
+    i = name.rfind('(')
+    return name[i:] if i != -1 else name
+
+def _capture_endpoints():
+    out = []
+    try:
+        enum = AudioUtilities.GetDeviceEnumerator()
+        col = enum.EnumAudioEndpoints(EDataFlow.eCapture.value, DEVICE_STATE.ACTIVE.value)
+        for i in range(col.GetCount()):
+            d = AudioUtilities.CreateDevice(col.Item(i))
+            if d.FriendlyName:
+                out.append((d.FriendlyName, d.id))
+    except Exception:
+        pass
+    return out
+
+def _default_capture_name():
+    try:
+        enum = AudioUtilities.GetDeviceEnumerator()
+        d = enum.GetDefaultAudioEndpoint(EDataFlow.eCapture.value, 0)
+        return AudioUtilities.CreateDevice(d).FriendlyName or ''
+    except Exception:
+        return ''
+
+def _protect_mic():
+    # The loopback capture ("CABLE Output") must never be the default recording
+    # device, or every app records the boosted system audio as its microphone.
+    # Pick the mic that pairs with the current output (headset mic when a headset
+    # is the sink), else the built-in mic — never a VB-Cable endpoint.
+    try:
+        cur = _default_capture_name()
+        if 'cable' not in cur.lower():
+            return                            # a real mic is already default
+        mics = [(n, i) for n, i in _capture_endpoints() if 'cable' not in n.lower()]
+        if not mics:
+            return
+        want = _cfg.get('out', '')
+        pick = None
+        if want:
+            sfx = _suffix(want)
+            pick = next((i for n, i in mics if _suffix(n) == sfx), None)   # headset mic
+        if pick is None:
+            pick = next((i for n, i in mics if n.startswith('Microphone Array')), None) \
+                or next((i for n, i in mics if n.startswith('Microphone')), None) \
+                or mics[0][1]
+        _set_default(pick)
+    except Exception:
+        pass
+
+_protect_mic()
+
 # VB-Cable does NOT attenuate the loopback, so the Windows volume/mute (of
 # VB-Cable, the default device) must be applied here too — otherwise volume
 # below 100% and the mute key would do nothing.
@@ -320,6 +374,7 @@ def _watch_output():
         time.sleep(2.0)
         try:
             _unmute_capture()             # keep the loopback source live
+            _protect_mic()                # keep the loopback out of the mic slot
             try:
                 cur = AudioUtilities.GetSpeakers().FriendlyName or ''
             except Exception:
