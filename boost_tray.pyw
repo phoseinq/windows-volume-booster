@@ -186,6 +186,21 @@ try:
 except Exception as e:
     print('device switch failed:', e)
 
+def _unmute_capture():
+    # If "CABLE Output" (the loopback we capture from) is muted, we read silence
+    # and play silence — total dead air even though everything looks fine.
+    try:
+        for d in AudioUtilities.GetAllDevices():
+            if d.FriendlyName and 'CABLE Output' in d.FriendlyName:
+                v = d.EndpointVolume
+                if v.GetMute():
+                    v.SetMute(0, None)
+                v.SetMasterVolumeLevelScalar(1.0, None)
+    except Exception:
+        pass
+
+_unmute_capture()
+
 # VB-Cable does NOT attenuate the loopback, so the Windows volume/mute (of
 # VB-Cable, the default device) must be applied here too — otherwise volume
 # below 100% and the mute key would do nothing.
@@ -304,6 +319,7 @@ def _watch_output():
     while True:
         time.sleep(2.0)
         try:
+            _unmute_capture()             # keep the loopback source live
             try:
                 cur = AudioUtilities.GetSpeakers().FriendlyName or ''
             except Exception:
