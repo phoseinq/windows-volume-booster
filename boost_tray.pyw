@@ -280,9 +280,12 @@ def _softclip(x):
         x[over] = s * (SC_KNEE + _SC_SPAN * np.tanh((ax[over] - SC_KNEE) / _SC_SPAN))
     return x
 
+_cb_count = [0]                       # heartbeat: bumped every callback, healthy or silent
+
 def _audio_cb(indata, outdata, frames, t, status):
     # Just boost + soft clip — no EQ/de-essing. The soft clipper is transparent
     # below the knee, so the sound quality is untouched; only peaks are rounded.
+    _cb_count[0] += 1
     with _lock:
         b = _boost
     np.clip(_softclip(indata * (b * _winvol[0])), -1.0, 1.0, out=outdata)
@@ -335,6 +338,7 @@ if _in is not None and _out is not None:
 
 _engaged = [True]                     # default device == cable -> booster active
 _prev_active = [None]                 # active endpoint names from the last poll
+_last_cb = [-1]                       # _cb_count seen at the previous watcher tick
 
 def _watch_output():
     """follow device hot-plug like Windows does: when a headset appears Windows
@@ -385,7 +389,13 @@ def _watch_output():
                       or next((n for n in active if n.startswith('Speakers')), None)
             if not target:
                 continue
-            dead = _stream is None or not _stream.active
+            # A stream can report .active while silently stalled (MME wedges,
+            # the backing device glitched). The callback bumps _cb_count every
+            # ~11 ms whether or not there's signal, so if it hasn't moved since
+            # the last 2 s tick the stream is dead even though .active is True.
+            stalled = _stream is not None and _cb_count[0] == _last_cb[0]
+            _last_cb[0] = _cb_count[0]
+            dead = _stream is None or not _stream.active or stalled
             if target == _cur_out[0] and not dead:
                 continue
             # sink changed (plug/unplug) or stream died: refresh the device
