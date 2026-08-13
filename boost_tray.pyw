@@ -268,7 +268,9 @@ _winvol = [1.0]
 # whole point — get exactly N× louder, no distortion), and only peaks above
 # the knee are smoothly saturated toward the ceiling, so louder material still
 # gains loudness without the hard-clip crackle.
-SC_KNEE = 0.6            # linear below this; tanh soft-knee from here to 1.0
+SC_KNEE = 0.8            # linear below this; tanh soft-knee from here to 1.0.
+                        # 0.8 keeps more of the signal clean (only true peaks are
+                        # saturated), roughly halving distortion around 150-250%.
 _SC_SPAN = 1.0 - SC_KNEE
 
 def _softclip(x):
@@ -293,16 +295,31 @@ def _audio_cb(indata, outdata, frames, t, status):
 _stream = None
 _cur_out = [None]                     # endpoint FriendlyName the stream renders to
 
+def _close_stream():
+    # abort() force-stops a wedged MME stream that close() alone can leave
+    # running; without it a reopen stacks a second stream and the two overlap
+    # (doubled / garbled audio).
+    global _stream
+    if _stream is not None:
+        try: _stream.abort()
+        except Exception: pass
+        try: _stream.close()
+        except Exception: pass
+        _stream = None
+
 def _open_stream(i, o, c):
     global _stream
+    _close_stream()
+    # Match the device's actual shared-mode rate (VB-Cable + Realtek are usually
+    # 44100). Hardcoding 48000 forced MME to resample both ends, which drifts and
+    # garbles the audio. Fall back to 48000 only if the query fails.
     try:
-        if _stream: _stream.close()
+        sr = int(round(sd.query_devices(i)['default_samplerate'])) or 48000
     except Exception:
-        pass
-    _stream = None
+        sr = 48000
     try:
-        _stream = sd.Stream(samplerate=48000, blocksize=512, device=(i, o),
-                            channels=c, dtype='float32', callback=_audio_cb, latency='low')
+        _stream = sd.Stream(samplerate=sr, blocksize=1024, device=(i, o),
+                            channels=c, dtype='float32', callback=_audio_cb, latency='high')
         _stream.start()
         return True
     except Exception:
@@ -339,6 +356,7 @@ if _in is not None and _out is not None:
 _engaged = [True]                     # default device == cable -> booster active
 _prev_active = [None]                 # active endpoint names from the last poll
 _last_cb = [-1]                       # _cb_count seen at the previous watcher tick
+_stall_strikes = [0]                  # consecutive ticks the callback hasn't advanced
 
 def _watch_output():
     """follow device hot-plug like Windows does: when a headset appears Windows
@@ -348,12 +366,17 @@ def _watch_output():
     idle (no HUD, native keys) until the cable is default again or a device is
     plugged in. Also revives the stream if it ever dies."""
     CoInitialize()
+    tick = 0
     while True:
         time.sleep(2.0)
+        tick += 1
         try:
-            _unmute_capture()             # keep the loopback source live
-            _unmute_endpoint(_cur_out[0]) # keep the physical output audible
-            _protect_mic()                # keep the loopback out of the mic slot
+            # device maintenance enumerates every COM endpoint — heavy — so run
+            # it every ~6 s, not every tick, to keep it off the audio path
+            if tick % 3 == 0:
+                _unmute_capture()             # keep the loopback source live
+                _unmute_endpoint(_cur_out[0]) # keep the physical output audible
+                _protect_mic()                # keep the loopback out of the mic slot
             try:
                 cur = AudioUtilities.GetSpeakers().FriendlyName or ''
             except Exception:
@@ -365,7 +388,9 @@ def _watch_output():
                         active.append(d.FriendlyName)
             except Exception:
                 continue
-            appeared = set(active) - set(_prev_active[0] or active)
+            prev = _prev_active[0]
+            appeared = set(active) - set(prev or active)
+            dev_changed = prev is not None and set(active) != set(prev)
             _prev_active[0] = active
             if 'cable' not in cur.lower():
                 if cur in appeared:
@@ -389,25 +414,26 @@ def _watch_output():
                       or next((n for n in active if n.startswith('Speakers')), None)
             if not target:
                 continue
-            # A stream can report .active while silently stalled (MME wedges,
-            # the backing device glitched). The callback bumps _cb_count every
-            # ~11 ms whether or not there's signal, so if it hasn't moved since
-            # the last 2 s tick the stream is dead even though .active is True.
-            stalled = _stream is not None and _cb_count[0] == _last_cb[0]
+            # Stall detection: the callback bumps _cb_count ~90×/s. If it hasn't
+            # moved across TWO ticks (~4 s) the stream is truly wedged. One frozen
+            # tick can be a transient, and reopening on a transient just stacks
+            # streams (doubled / garbled audio), so require two in a row.
+            if _stream is not None and _cb_count[0] == _last_cb[0]:
+                _stall_strikes[0] += 1
+            else:
+                _stall_strikes[0] = 0
             _last_cb[0] = _cb_count[0]
+            stalled = _stall_strikes[0] >= 2
             dead = _stream is None or not _stream.active or stalled
             if target == _cur_out[0] and not dead:
                 continue
-            # sink changed (plug/unplug) or stream died: refresh the device
-            # table (PortAudio snapshots it at init) and reopen
-            try:
-                if _stream: _stream.close()
-            except Exception:
-                pass
-            try:
-                sd._terminate(); sd._initialize()
-            except Exception:
-                pass
+            # Reopen. Only re-init PortAudio when the device set actually changed
+            # (it snapshots devices at init); a pure stall reopens on the SAME
+            # device, and re-initing there needlessly churns threads.
+            _close_stream()
+            if dev_changed or target != _cur_out[0]:
+                try: sd._terminate(); sd._initialize()
+                except Exception: pass
             i = _find_sd('CABLE Output', 'in')
             o = _find_out_by_name(target)
             if i is None or o is None:
@@ -416,6 +442,8 @@ def _watch_output():
             except Exception: c = 2
             if _open_stream(i, o, c):
                 _cur_out[0] = target
+                _stall_strikes[0] = 0
+                _last_cb[0] = _cb_count[0]
                 _unmute_endpoint(target)
         except Exception:
             pass
