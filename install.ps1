@@ -63,6 +63,9 @@ New-Item -ItemType Directory -Force -Path $dest | Out-Null
 $local = if ($PSCommandPath) { Join-Path (Split-Path -Parent $PSCommandPath) 'boost_tray.pyw' } else { $null }
 if ($local -and (Test-Path $local)) { Copy-Item $local "$dest\boost_tray.pyw" -Force }
 else { Invoke-WebRequest "$RAW/boost_tray.pyw" -OutFile "$dest\boost_tray.pyw" -UserAgent 'Mozilla/5.0' }
+$helper = if ($PSCommandPath) { Join-Path (Split-Path -Parent $PSCommandPath) 'audio_device_selection.py' } else { $null }
+if ($helper -and (Test-Path $helper)) { Copy-Item $helper "$dest\audio_device_selection.py" -Force }
+else { Invoke-WebRequest "$RAW/audio_device_selection.py" -OutFile "$dest\audio_device_selection.py" -UserAgent 'Mozilla/5.0' }
 
 Write-Host "[4/5] Autostart on login..."
 $val = "`"$pyw`" `"$dest\boost_tray.pyw`""

@@ -17,6 +17,7 @@ import threading
 import ctypes
 import ctypes.wintypes as wintypes
 import tkinter as tk
+from audio_device_selection import find_output_index
 
 # single instance: if already running, exit (avoids double tray / device fight)
 _mx = ctypes.windll.kernel32.CreateMutexW(None, False, 'AudioBoostBeyond100_singleton')
@@ -124,15 +125,11 @@ atexit.register(_restore_default)
 def _find_out_by_name(name):
     """match an endpoint FriendlyName against sounddevice outputs
     (MME names are truncated to 31 chars, so compare by prefix)"""
-    if not name:
-        return None
-    n = name.lower()
-    for i, d in enumerate(sd.query_devices()):
-        if d['max_output_channels'] > 0:
-            dn = d['name'].lower()
-            if n.startswith(dn) or dn.startswith(n):
-                return i
-    return None
+    devices = sd.query_devices()
+    i = find_output_index(devices, name, prefer_usb=not name)
+    if i is not None:
+        return i
+    return find_output_index(devices, '', prefer_usb=True)
 
 def _real_output_name():
     """the device the user actually listens on = whatever was default before
@@ -404,7 +401,8 @@ def _open_stream(i, o, c):
                                    latency=0.08)
         _istream.start(); _stream.start()
         return True
-    except Exception:
+    except Exception as e:
+        print(f'AudioBoost: stream open failed (input={i}, output={o}, channels={c}, rate={sr}): {e}', flush=True)
         _close_stream()
         return False
 
@@ -433,6 +431,7 @@ if _in is not None and _out is not None:
         if _open_stream(_in, _out, _ch):
             try: _cur_out[0] = sd.query_devices(_out)['name']
             except Exception: pass
+            print(f"AudioBoost: stream active: input={_in} ({sd.query_devices(_in)['name']}), output={_out} ({sd.query_devices(_out)['name']}), channels={_ch}", flush=True)
             break
         time.sleep(1.0)
 
@@ -493,7 +492,8 @@ def _watch_output():
             want = _cfg.get('out', '')
             target = want if want in active else None
             if target is None:
-                target = next((n for n in active if n.startswith('Speakers (Realtek')), None) \
+                target = next((n for n in active if 'usb' in n.lower() and ('speaker' in n.lower() or 'headphone' in n.lower()) and 'cable' not in n.lower()), None) \
+                      or next((n for n in active if n.startswith('Speakers (Realtek')), None) \
                       or next((n for n in active if n.startswith('Speakers')), None)
             if not target:
                 continue
